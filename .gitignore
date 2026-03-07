@@ -3,6 +3,19 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# Figure and data folders
+svgs/
+data/
+prepared_adata/
+Preprocessed/
+
+# Notebooks
+format_data.ipynb
+*.tmap
+*.h5ad
+
+
+
 # C extensions
 *.so
 
