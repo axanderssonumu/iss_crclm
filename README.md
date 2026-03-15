@@ -6,7 +6,7 @@ This repository contains code used to reproduce the figures and analyses present
 
 Analyses are implemented in a single Jupyter notebook:
 
-**➡ [`analyses.ipynb`](analyses.ipynb)**
+**[`analyses.ipynb`](analyses.ipynb)**
 
 The notebook contains the methods used for clustering the data and generating the analysis figures presented in the manuscript.
 
@@ -16,13 +16,13 @@ The processed data required to run the notebook is not included in this reposito
 
 The data can be interactively be visualized from:
 
-**➡ [`Online viewer`](https://crclm2.serve.scilifelab.se)**
+**[`Online viewer`](https://crclm2.serve.scilifelab.se)**
 
 The data, including images, gene count tables (AnnData), raw transcripts (AnnData) and regions (GeoJSON) can be downloaded from:
 
-**➡ [`Panel 2 data (.tar)`](https://crclm2.serve.scilifelab.se/iss_panel_2.tmap?dl=1)**
+**[`Panel 2 data (.tar)`](https://crclm2.serve.scilifelab.se/iss_panel_2.tmap?dl=1)**
 
-**➡ [`Panel 1 data (.tar)`](https://crclm2.serve.scilifelab.se/iss_panel_1.tmap?dl=1)**
+**[`Panel 1 data (.tar)`](https://crclm2.serve.scilifelab.se/iss_panel_1.tmap?dl=1)**
 
 After downloading, extract .tar data and place it in a `data/` directory in the repository so that the folder structure looks like:
 
@@ -47,7 +47,7 @@ project_root/
 
 ## Environment setup
 
-The analysis was performed using Python 3. To recreate the environment used in this repository:
+The analysis was performed using Python 3.10. To recreate the environment used in this repository:
 
 1. Create a new Conda environment:
 

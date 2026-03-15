@@ -13,7 +13,7 @@ from typing import Optional, List
 
 from scipy.stats import mannwhitneyu
 from statsmodels.stats.multitest import multipletests
-from statannotations.Annotator import Annotator
+from statannotations.Annotator import Annotator, Annotation
 
 plt.rcParams['svg.fonttype'] = 'none'
 
@@ -93,8 +93,9 @@ def custom_dotplot_raw(
                 raise ValueError("If genes is None, adata.uns must contain 'marker_genes'")
             genes = []
             for cluster in cluster_order:
-                genes.extend([g for g in adata.uns['marker_genes'][cluster]])
-            genes = list(genes)
+                for gene in adata.uns['marker_genes'][cluster]:
+                    if gene not in genes:
+                        genes.append(gene)
  
     if figsize is None:
         width = max(len(genes) * 0.4 + 1, 4)
@@ -146,7 +147,7 @@ def custom_dotplot_raw(
         cmap=custom_cmap,
         size_title='% of cells in cluster\nexpressing the gene',
         layer='X_raw_scaled',
-        return_fig=True
+        return_fig=True,
     )
  
     ax_dotplot = fig.get_axes()['mainplot_ax']
@@ -298,7 +299,48 @@ def compute_p_values(df, clusters, regions, groups):
     return {(r['Cluster'], r['Region']): r['P-value adjusted'] for _, r in df_p.iterrows()}
 
 
-def plot_cluster_proportions_between_groups(adata: sc.AnnData, cluster_key: str, group_key: str, sample_key: str, patient_key: str, region_mask_keys: List[str], clusters_to_plot: Optional[List[str]] = None, save: Optional[str] =None, plot_horizontal: bool =True, pval_format:str='star'):
+
+def _format_annotation_results(annotations_results: List[List[Annotation]], subplot_labels: List[str], subplot_corresponds_to_region: bool) -> pd.DataFrame:
+    if len(subplot_labels) != len(annotations_results):
+        raise ValueError(f"Length of subplot_labels ({len(subplot_labels)}) must match length of annotation_results ({len(annotations_results)})")
+
+
+    formatted_results = []
+    for subplot_idx, res_per_subplot in enumerate(annotations_results):
+        for res_per_group in res_per_subplot:
+            stat_results = res_per_group.data
+            group1 = stat_results.group1
+            group2 = stat_results.group2
+
+            # If group is a tuple, group[0] is a region/gene, group[1]
+            # is the growth pattern. 
+            if isinstance(group1, tuple) and isinstance(group2, tuple):
+                group1 = group1[0] 
+                group2 = group2[0]
+
+            if subplot_corresponds_to_region:
+                # Each subplot corresponds to a region,
+                # each group in the subplot is a gene
+                region = subplot_labels[subplot_idx]
+                label = group1
+            else:
+                # Each subplot corresponds to a cluster
+                # Each group corresponds to a region
+                region = group1
+                label = subplot_labels[subplot_idx]
+
+            if group1 != group2:
+                raise ValueError(f"Expected group1 and group2 to be single values, but got {group1} and {group2}")
+            
+            formatted_results.append({
+                'label' : label,
+                'region' : region,
+                'group' : group1,
+                'pvalue': stat_results.pvalue
+            })
+    return pd.DataFrame(formatted_results)
+
+def plot_cluster_proportions_between_groups(adata: sc.AnnData, cluster_key: str, group_key: str, sample_key: str, patient_key: str, region_mask_keys: List[str], clusters_to_plot: Optional[List[str]] = None, save: Optional[str] =None, plot_horizontal: bool =True, figsize: Optional[tuple] = None, average_same_patient:bool=True, pval_format:str='star'):
     """
     Plot cluster proportions between two groups across multiple regions.
     
@@ -329,13 +371,20 @@ def plot_cluster_proportions_between_groups(adata: sc.AnnData, cluster_key: str,
         Path to save the figure. If None, figure is not saved.
     plot_horizontal : bool, default=True
         Whether to plot the clusters horizontally (True) or vertically (False).
-    
+    figsize : Optional[tuple], default=None
+        Figure size (width, height) in inches. If None, a default size is used.
+    average_same_patient : bool, default=True
+        Wheter to average proportions from samples of the same patient together to avoid inflating n.
+    pval_format : str, default='star'
+        Format for p-value annotations. 'star' for significance stars, 'simple' for numeric p-values.
     Returns
     -------
     fig : matplotlib.figure.Figure
         The generated figure object.
     axs : np.ndarray of matplotlib.axes.Axes
         Array of subplot axes, one per cluster.
+    annotator_results : pd.DataFrame
+        DataFrame containing the results of the statistical tests.
     
     Raises
     ------
@@ -409,7 +458,10 @@ def plot_cluster_proportions_between_groups(adata: sc.AnnData, cluster_key: str,
                     'Proportion (%)': freq
                 })
 
-    df = pd.DataFrame(records).groupby(['Patient', 'Region', 'Cluster', 'Group'])['Proportion (%)'].mean().reset_index()
+    if average_same_patient:
+        df = pd.DataFrame(records).groupby(['Patient', 'Region', 'Cluster', 'Group'])['Proportion (%)'].mean().reset_index()
+    else:
+        df = pd.DataFrame(records)
     adjusted_pval_dict = compute_p_values(df, unique_clusters, unique_regions, unique_groups)
 
     # Create the figure and axes
@@ -418,20 +470,30 @@ def plot_cluster_proportions_between_groups(adata: sc.AnnData, cluster_key: str,
 
     # Plotting
     n_subplots = len(clusters_to_plot)
-    if plot_horizontal:
-        height = BOXPLOT_HEIGHT
+    if figsize is not None:
+        width, height = figsize
+    elif plot_horizontal:
         width = BOXPLOT_WIDTH(len(unique_regions)) * n_subplots
-        fz = BOXPLOT_FONTSIZE
-        fig, axs = plt.subplots(ncols=n_subplots, nrows=1, figsize=(width, height), sharex=False)
+        height = BOXPLOT_HEIGHT
     else:
-        height = BOXPLOT_HEIGHT * n_subplots
         width = BOXPLOT_WIDTH(len(unique_regions))
-        fz = BOXPLOT_FONTSIZE
-        fig, axs = plt.subplots(ncols=1, nrows=n_subplots, figsize=(width, height), sharex=True, constrained_layout=True)
+        height = BOXPLOT_HEIGHT * n_subplots
+
+    fz = BOXPLOT_FONTSIZE
+    subplot_kwargs = dict(figsize=(width, height))
+    if plot_horizontal:
+        subplot_kwargs.update(ncols=n_subplots, nrows=1, sharex=False)
+    else:
+        subplot_kwargs.update(ncols=1, nrows=n_subplots, sharex=True, constrained_layout=True)
+
+    fig, axs = plt.subplots(**subplot_kwargs)
 
     if n_subplots == 1:
         axs = np.array([axs])  # ensure axs is always an array for consistent indexing
         
+
+    annotator_results = []
+    
     for ax, cluster_to_plot in zip(axs, clusters_to_plot):
 
         data = df.query('Cluster == @cluster_to_plot')
@@ -452,7 +514,7 @@ def plot_cluster_proportions_between_groups(adata: sc.AnnData, cluster_key: str,
         if plot_horizontal and ax == axs[0]:
             ax.set_ylabel('Proportion (%)', fontsize=fz)
         else:
-            ax.set_ylabel(None)
+            ax.set_ylabel('Proportion (%)', fontsize=fz)
 
         ax.tick_params(axis='x', labelsize=fz, rotation=90)
         ax.tick_params(axis='y', labelsize=fz)
@@ -479,33 +541,36 @@ def plot_cluster_proportions_between_groups(adata: sc.AnnData, cluster_key: str,
                 
         if pairs:
             annotator = Annotator(ax, pairs, data=data, hue='Group', y='Proportion (%)', x='Region', order=unique_regions)
-            annotator.configure(
+            _, annotation_res = annotator.configure(
                 test=None,
                 text_format=pval_format,
                 hide_non_significant=True if pval_format == 'star' else False,
                 loc='inside',
                 pvalue_thresholds=[[1e-4, "****"], [1e-3, "***"], [1e-2, "**"], [0.05, "*"]]
             ).set_pvalues_and_annotate(p_values)
-        
+            annotator_results.append(annotation_res)
+
         g.legend(frameon=False, loc='best',  ncols=1, fontsize=fz)
         
         if plot_horizontal or n_subplots == 1:
             force_same_axis_height(ax)
 
     if not plot_horizontal:
-        for ax in axs:
-            ax.set_box_aspect(1) 
+        if figsize is None:
+            for ax in axs:
+                ax.set_box_aspect(1) 
 
 
     if save is not None:
         fig.savefig(save, dpi=300, transparent=True, bbox_inches='tight')
 
-    return fig, axs, p_values
+    annotator_results = _format_annotation_results(annotator_results, clusters_to_plot, subplot_corresponds_to_region=False)
+    return fig, axs, annotator_results
 
 
 
 
-def plot_gene_counts(adata: sc.AnnData, group_key: str, sample_key: str, patient_key: str, region_mask_keys: List[str], genes: str, save: Optional[str] =None, plot_horizontal: bool =True, axes: Optional[np.ndarray] =None, normalize: Optional[bool] = False):
+def plot_gene_counts(adata: sc.AnnData, group_key: str, sample_key: str, patient_key: str, region_mask_keys: List[str], genes: str, save: Optional[str] =None, plot_horizontal: bool =True, axes: Optional[np.ndarray] =None, average_same_patient: bool = True, normalize: Optional[bool] = False):
     """
     Plot raw gene expression counts across tissue regions and groups.
     
@@ -543,13 +608,17 @@ def plot_gene_counts(adata: sc.AnnData, group_key: str, sample_key: str, patient
         is normalized by the mean total read count in that region.
         The normalized values are multiplied with the mean total read
         count across all samples and region to obtain pseudo-counts.
-    
+    average_same_patient : bool, default=True
+        Wheter to average proportions from samples of the same patient together to avoid inflating n.
     Returns
     -------
     fig : matplotlib.figure.Figure
         The generated figure object.
     axs : np.ndarray of matplotlib.axes.Axes
         Array of subplot axes, one per region.
+    annotator_results : pd.DataFrame
+        DataFrame containing the results of the statistical tests.
+
     
     Raises
     ------
@@ -647,7 +716,10 @@ def plot_gene_counts(adata: sc.AnnData, group_key: str, sample_key: str, patient
 
     
     # Aggregate by patient and convert to categorical
-    df = df.groupby(['Patient', 'Group', 'Gene', 'Region'])['Average expression'].mean().reset_index()
+    if average_same_patient:
+        df = df.groupby(['Patient', 'Group', 'Gene', 'Region'])['Average expression'].mean().reset_index()
+    else:
+        df = pd.DataFrame(records)
     df['Group'] = df['Group'].astype('category')
     df['Gene'] = df['Gene'].astype('category')
 
@@ -675,6 +747,7 @@ def plot_gene_counts(adata: sc.AnnData, group_key: str, sample_key: str, patient
             axs = np.array([axs])  # ensure axs is always an array for consistent indexing
 
     # Plot each region
+    annotator_results = []
     for idx, region in enumerate(region_mask_keys):
         region_data = df.query('Region == @region')
         
@@ -704,15 +777,15 @@ def plot_gene_counts(adata: sc.AnnData, group_key: str, sample_key: str, patient
             order=genes
         )
         annotator.configure(test='Mann-Whitney', text_format='star', loc='inside')
-        annotator.apply_and_annotate()
-        
+        _, annotator_res = annotator.apply_and_annotate()
+        annotator_results.append(annotator_res)
         # Styling
         axs[idx].legend(frameon=False, loc='best', ncols=1, fontsize=BOXPLOT_FONTSIZE)
         axs[idx].set_xlabel(None)
         if plot_horizontal and idx == 0:
             axs[idx].set_ylabel('Mean count per cell', fontsize=BOXPLOT_FONTSIZE)
         else:
-            axs[idx].set_ylabel(None)
+            axs[idx].set_ylabel('Mean count per cell', fontsize=BOXPLOT_FONTSIZE)
             
         axs[idx].set_title(f'{region} region', fontsize=BOXPLOT_FONTSIZE)
 
@@ -740,8 +813,9 @@ def plot_gene_counts(adata: sc.AnnData, group_key: str, sample_key: str, patient
     #        ax.set_box_aspect(1)
 
     if save is not None:
-        fig.savefig(save)
-    return fig, axs
+        fig.savefig(save, dpi=300, transparent=True, bbox_inches='tight')
+    annotator_results = _format_annotation_results(annotator_results, region_mask_keys, subplot_corresponds_to_region=True)
+    return fig, axs, annotator_results
 
 
 
@@ -935,19 +1009,77 @@ def _infer_gene_groups(adata: sc.AnnData) -> dict[str, list[str]]:
         groups[REGION_ORDER[region_idx]] = genes_sorted.tolist()
     return groups
 
-def _set_xtick_style(ax, italic_xticklabels: bool) -> None:
-    font_style = "italic" if italic_xticklabels else "normal"
+def _set_tick_style(ax, italic_labels: bool, swap_axes: bool) -> None:
+    font_style = "italic" if italic_labels else "normal"
+    if not swap_axes:
+        for label in ax.get_xticklabels():
+            label.set_fontstyle(font_style)
+    else:
+        for label in ax.get_yticklabels():
+            label.set_fontstyle(font_style)
+def _set_font_size(ax, fontsize: int) -> None:
     for label in ax.get_xticklabels():
-        label.set_fontstyle(font_style)
+        label.set_fontsize(fontsize)
+    for label in ax.get_yticklabels():
+        label.set_fontsize(fontsize)
+
+def _set_colorbar_position(
+    main_ax,
+    cbar_ax,
+    swap_axes: bool,
+    fontsize: int = 10,
+    cbar_max_height_in: float = 3.0,
+) -> None:
+
+    # If swap_axes is true, make the colorbar vertical.
+    # Put the ticks on the vertical size of the colorbar
+    fig = main_ax.figure
+    fig_h_in = fig.get_size_inches()[1]
+
+    # If the figure is short, use full figure height.
+    # If the figure is tall, cap colorbar height to cbar_max_height_in.
+    if fig_h_in <= cbar_max_height_in:
+        bar_bottom = 0.0
+        bar_height = 1.0
+    else:
+        bar_height = cbar_max_height_in / fig_h_in
+        bar_bottom = (1.0 - bar_height) / 2.0
+
+    cbar_ax.set_position([
+        main_ax.get_position().x1 + 0.01,
+        bar_bottom,
+        0.02,
+        bar_height,
+    ])
+
+    # Recreate the colorbar as vertical. Moving the axis alone does not
+    # change orientation for an existing horizontal colorbar.
+    label_text = cbar_ax.get_xlabel() or cbar_ax.get_ylabel() or COLORBAR_TITLE
+    mappable = main_ax.collections[0]
+
+    cbar_ax.clear()
+    cbar = main_ax.figure.colorbar(mappable, cax=cbar_ax, orientation="vertical")
+    cbar.set_label(label_text, rotation=90, fontsize=fontsize)
+
+    # Ensure ticks/labels are only on the vertical (y) axis.
+    cbar.ax.tick_params(axis="x", which="both", bottom=False, top=False, labelbottom=False)
+    cbar.ax.tick_params(axis="y", labelsize=fontsize)
+    cbar.ax.yaxis.set_ticks_position("right")
+    cbar.ax.yaxis.set_label_position("right")
+
+
 
 def plot_counts_per_ehgp_region(
     counts_per_area: pd.DataFrame,
     gene_groups: Optional[dict] = None,
-    italic_xticklabels: bool = True,
+    italic_labels: bool = True,
     figsize=None,
     split_by_group: bool = False,
     show_groups: bool = True,
-    save: Optional[str] = None
+    swap_axes: bool = False,
+    save: Optional[str] = None,
+    fontsize: int = 10,
+    cbar_max_height_in: float = 3.0,
 ):
     """
     Plot EHGP region-level relative counts as a matrix plot.
@@ -966,7 +1098,7 @@ def plot_counts_per_ehgp_region(
         Mapping of group name to list of labels to plot. If ``None``, labels are
         grouped automatically by the region where each label has its highest
         average value.
-    italic_xticklabels : bool, default=True
+    italic_labels : bool, default=True
         If ``True``, x-axis label names are rendered in italic.
     figsize : tuple | None, default=None
         Figure size passed to the underlying matrix plot.
@@ -976,8 +1108,17 @@ def plot_counts_per_ehgp_region(
     show_groups : bool, default=True
         If ``False``, group structure is flattened and labels are plotted as a
         single list.
+    swap_axes : bool, default=False
+        If ``True``, swaps x and y axes of the matrix plot (regions on x
+        axis and labels on y axis).
     save : Optional[str], default=None
         Path to save the figure. If None, figure is not saved.
+    fontsize : int, default=10
+        Font size for group titles and axis labels.
+    cbar_max_height_in : float, default=3.0
+        Maximum colorbar height in inches when ``swap_axes=True``.
+        If figure height is smaller than this value, colorbar uses full
+        figure height. Otherwise, colorbar height is clipped to this maximum.
 
     Returns
     -------
@@ -1007,10 +1148,14 @@ def plot_counts_per_ehgp_region(
             gene_groups = {"Genes": list(gene_groups)}
 
         n_groups = len(gene_groups)
-        fig, axs = plt.subplots(n_groups, 1, figsize=figsize)
+        if not swap_axes:
+            fig, axs = plt.subplots(n_groups, 1, figsize=figsize)
+        else:
+            fig, axs = plt.subplots(1, n_groups, figsize=figsize)
         axs = np.atleast_1d(axs)
-        plt.subplots_adjust(hspace=1.5)
+        fig.subplots_adjust(wspace=0.5)
 
+       
         for i, (group, genes) in enumerate(gene_groups.items()):
             fig_sub = sc.pl.matrixplot(
                 adata,
@@ -1022,15 +1167,33 @@ def plot_counts_per_ehgp_region(
                 return_fig=True,
                 ax=axs[i],
                 show=True,
+                swap_axes=swap_axes,
                 figsize=(figsize[0], 1) if figsize is not None else (n_genes, 1),
             )
+        
+
             main_ax = fig_sub.get_axes()["mainplot_ax"]
-            main_ax.set_title(group, fontsize=10)
+            cbar_ax = fig_sub.get_axes()["color_legend_ax"]
+            # Only show one colorbar for the last subplot
+            if i < n_groups - 1:
+                cbar_ax.set_visible(False)
+
+
+            main_ax.set_title(group, fontsize=fontsize)
             axs[i] = main_ax
-            _set_xtick_style( axs[i], italic_xticklabels)
+            _set_colorbar_position(
+                axs[i],
+                cbar_ax,
+                swap_axes,
+                fontsize=fontsize,
+                cbar_max_height_in=cbar_max_height_in,
+            )
+            _set_tick_style( axs[i], italic_labels, swap_axes=swap_axes)
+            _set_font_size(axs[i], fontsize)
+
     else:
         fig, ax = plt.subplots(figsize=figsize if figsize is not None else (n_genes, 1))
-        sub_fig = sc.pl.matrixplot(
+        fig_sub = sc.pl.matrixplot(
             adata,
             gene_groups,
             groupby="Region",
@@ -1040,10 +1203,22 @@ def plot_counts_per_ehgp_region(
             return_fig=True,
             ax=ax,
             show=True,
+            swap_axes=swap_axes,
             figsize=figsize if figsize is not None else (n_genes, 1),
         )
-        ax = sub_fig.get_axes()["mainplot_ax"]
-        _set_xtick_style(ax, italic_xticklabels)
+        ax = fig_sub.get_axes()["mainplot_ax"]
+        cbar_ax = fig_sub.get_axes()["color_legend_ax"]
+        _set_colorbar_position(
+            ax,
+            cbar_ax,
+            swap_axes,
+            fontsize=fontsize,
+            cbar_max_height_in=cbar_max_height_in,
+        )
+        _set_tick_style(ax, italic_labels, swap_axes=swap_axes)
+        _set_font_size(ax, fontsize)
+
+
 
     if save is not None:
         fig.savefig(save)
